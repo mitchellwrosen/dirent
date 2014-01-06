@@ -5,20 +5,35 @@ module Dirent
     , makeDirent
     ) where
 
-import Control.Applicative    ((<$>))
-import Control.Concurrent     (Chan, forkIO, newChan, readChan, writeChan)
-import Control.Monad          (liftM, void)
-import Control.Monad.Trans    (liftIO)
-import Control.Monad.Writer   (WriterT, execWriterT, tell)
-import System.Directory       (getDirectoryContents)
-import System.Posix.Files     (getFileStatus, isDirectory)
-import System.FilePath        ((</>))
+import           Control.Applicative  ((<$>))
+import           Control.Concurrent   (Chan, forkIO, newChan, readChan, writeChan)
+import           Control.Monad        (liftM, void)
+import           Control.Monad.Trans  (liftIO)
+import           Control.Monad.Writer (WriterT, execWriterT, tell)
+import           Data.Set             (Set)
+import qualified Data.Set             as S
+import           System.Directory     (getDirectoryContents)
+import           System.Posix.Files   (getFileStatus, isDirectory)
+import           System.FilePath      ((</>))
 
-import ThreadManager          (forkManaged, withManager_)
+import           ThreadManager        (forkManaged, withManager_)
 
-data Dirent a = Directory FilePath [Dirent a]
+data Dirent a = Directory FilePath (Set (Dirent a))
               | File FilePath a
               deriving Show
+
+-- Compare Dirents on their file path; the tag is inconsequential.
+instance Eq (Dirent a) where
+    (Directory p1 _) == (Directory p2 _) = p1 == p2
+    (File      p1 _) == (File      p2 _) = p1 == p2
+    _ == _ = False
+
+-- Order by file path, alphabetical.
+instance Ord (Dirent a) where
+    (Directory p1 _) <= (Directory p2 _) = p1 <= p2
+    (Directory p1 _) <= (File      p2 _) = p1 <= p2
+    (File      p1 _) <= (Directory p2 _) = p1 <= p2
+    (File      p1 _) <= (File      p2 _) = p1 <= p2
 
 type Handler a = FilePath -> IO a
 
@@ -31,8 +46,8 @@ makeDirent f path = do
 
 processDirectory :: forall a. Handler a -> FilePath -> IO (Dirent a)
 processDirectory f path = do
-    chan <- newChan                        -- Create channel to recieve (Maybe (Dirent a))s on
-    void $ forkIO $ processDirectory' chan -- Send (Maybe (Dirent a))s and then a Nothing
+    chan <- newChan                                -- Create channel to recieve (Maybe (Dirent a))s on
+    void $ forkIO $ processDirectory' chan         -- Send (Maybe (Dirent a))s and then a Nothing
     Directory path `liftM` execWriterT (loop chan) -- Write sent (Just (Dirent a))s to children of Directory
   where
     processDirectory' :: Chan (Maybe (Dirent a)) -> IO ()
@@ -42,10 +57,10 @@ processDirectory f path = do
         writeChan chan Nothing -- notify parent that all Dirents have been created
 
     -- Read from input channel until Nothing; collect children dirents in a Writer
-    loop :: Chan (Maybe (Dirent a)) -> WriterT [Dirent a] IO ()
+    loop :: Chan (Maybe (Dirent a)) -> WriterT (Set (Dirent a)) IO ()
     loop chan = do
         val <- liftIO $ readChan chan
-        whenJust val $ \a -> tell [a] >> loop chan
+        whenJust val $ \a -> tell (S.singleton a) >> loop chan
 
 -- | Like getDirectoryContents, but prepend the directory name, and remove "." and "..".
 getDirectoryContents' :: FilePath -> IO [FilePath]
