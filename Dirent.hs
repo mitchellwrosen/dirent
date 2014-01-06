@@ -3,6 +3,7 @@
 module Dirent
     ( Dirent(..)
     , makeDirent
+    , makeDirentThreaded
     ) where
 
 import           Control.Applicative ((<$>))
@@ -14,7 +15,7 @@ import           System.Directory    (getDirectoryContents)
 import           System.Posix.Files  (getFileStatus, isDirectory)
 import           System.FilePath     ((</>))
 
-import           ThreadManager       (ThreadStatus(..), forkManaged, withManager)
+import           ThreadManager       (FinishedThreadStatus, forkManaged, withManager)
 
 -- A directory entry tagged with some data of type a. An exception could be
 -- thrown trying to tag a dirent, hence the third data constructor.
@@ -40,27 +41,35 @@ instance Ord (Dirent a) where
 type Handler a = FilePath -> IO a
 
 makeDirent :: Handler a -> FilePath -> IO (Dirent a)
-makeDirent f path = do
+makeDirent = makeDirentInternal processDirectory
+
+makeDirentThreaded :: Handler a -> FilePath -> IO (Dirent a)
+makeDirentThreaded = makeDirentInternal processDirectoryThreaded
+
+makeDirentInternal :: (Handler a -> FilePath -> IO (Dirent a)) -> Handler a -> FilePath -> IO (Dirent a)
+makeDirentInternal processDirectoryFunction f path = do
     -- TODO catch exception
     is_dir <- isDirectory `liftM` getFileStatus path
     if is_dir
-        then processDirectory f path
+        then processDirectoryFunction f path
         else processFile f path
 
-processDirectory :: forall a. Handler a -> FilePath -> IO (Dirent a)
-processDirectory f path = Directory path . S.fromList . map threadStatusToDirent <$> processDirectory'
+processDirectoryThreaded :: forall a. Handler a -> FilePath -> IO (Dirent a)
+processDirectoryThreaded f path = Directory path . S.fromList . map finishedThreadStatusToDirent <$>
+                                      processDirectoryThreaded'
   where
-    processDirectory' :: IO [ThreadStatus (Dirent a)]
-    processDirectory' =
+    processDirectoryThreaded' :: IO [FinishedThreadStatus (Dirent a)]
+    processDirectoryThreaded' =
         withManager $ \threadManager -> do
-            getDirectoryContents' path >>= mapM_ (forkManaged threadManager . processPath f)
+            getDirectoryContents' path >>= mapM_ (forkManaged threadManager . processPathThreaded f)
 
-    threadStatusToDirent :: ThreadStatus (Dirent a) -> Dirent a
-    threadStatusToDirent (Finished d) = d
-    threadStatusToDirent (Threw e)    = ExceptionThrown e
-    -- Not reached because threads are waited on in withManager. Should probably refactor
-    -- ThreadStatus for this reason.
-    threadStatusToDirent Running = undefined
+    finishedThreadStatusToDirent :: FinishedThreadStatus (Dirent a) -> Dirent a
+    finishedThreadStatusToDirent (Right d) = d
+    finishedThreadStatusToDirent (Left e)  = ExceptionThrown e
+
+processDirectory :: Handler a -> FilePath -> IO (Dirent a)
+processDirectory f path = fmap (Directory path . S.fromList) $
+    getDirectoryContents' path >>= mapM (processPath f)
 
 -- | Like getDirectoryContents, but prepend the directory name, and remove "." and "..".
 getDirectoryContents' :: FilePath -> IO [FilePath]
@@ -70,6 +79,12 @@ processFile :: Handler a -> FilePath -> IO (Dirent a)
 processFile f path = File path <$> f path
 
 processPath :: Handler a -> FilePath -> IO (Dirent a)
-processPath f path = do
+processPath = processPathInternal processDirectory
+
+processPathThreaded :: Handler a -> FilePath -> IO (Dirent a)
+processPathThreaded = processPathInternal processDirectoryThreaded
+
+processPathInternal :: (Handler a -> FilePath -> IO (Dirent a)) -> Handler a -> FilePath -> IO (Dirent a)
+processPathInternal processDirectoryFunction f path = do
     is_dir <- isDirectory <$> getFileStatus path
-    if is_dir then processDirectory f path else processFile f path
+    if is_dir then processDirectoryFunction f path else processFile f path
